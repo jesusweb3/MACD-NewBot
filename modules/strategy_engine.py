@@ -17,7 +17,13 @@ class StrategyEngine:
         self.waiting_for_candle_close = False
         self.crossover_timestamp = None
 
+        # Новые переменные для правильной логики
+        self.crossover_blocked = False  # Блокировка пересечений до конца свечи
+        self.candle_close_processed = False  # Обработка закрытия свечи
+        self.last_processed_candle_time = None  # Время последней обработанной свечи
+
     def detect_crossover(self, current_macd, current_signal):
+        """Детекция пересечений MACD и Signal"""
         if self.previous_macd is None or self.previous_signal is None:
             return None
 
@@ -36,6 +42,7 @@ class StrategyEngine:
         return None
 
     def execute_crossover_action(self, direction, current_price):
+        """Выполнение действий при пересечении"""
         if direction == "BULLISH":
             self.logger.macd_crossover("BULLISH", self.previous_macd, self.previous_signal, current_price)
             success = self.trading_engine.open_long()
@@ -43,6 +50,7 @@ class StrategyEngine:
                 self.current_position_side = "Buy"
                 self.last_crossover_direction = "BULLISH"
                 self.waiting_for_candle_close = True
+                self.crossover_blocked = True  # Блокируем новые пересечения
                 self.crossover_timestamp = datetime.now()
 
         elif direction == "BEARISH":
@@ -52,9 +60,11 @@ class StrategyEngine:
                 self.current_position_side = "Sell"
                 self.last_crossover_direction = "BEARISH"
                 self.waiting_for_candle_close = True
+                self.crossover_blocked = True  # Блокируем новые пересечения
                 self.crossover_timestamp = datetime.now()
 
     def check_crossover_maintenance(self, current_macd, current_signal):
+        """Проверка сохранения направления пересечения после закрытия свечи"""
         if not self.waiting_for_candle_close or not self.last_crossover_direction:
             return
 
@@ -68,6 +78,7 @@ class StrategyEngine:
             # Crossover maintained - wait for opposite crossover
             self.logger.crossover_check(True, "WAITING_FOR_OPPOSITE")
             self.waiting_for_candle_close = False
+            self.crossover_blocked = False  # Разблокируем пересечения
         else:
             # Crossover not maintained - reverse position
             self.logger.crossover_check(False, "REVERSING_POSITION")
@@ -82,9 +93,11 @@ class StrategyEngine:
                     self.current_position_side = "Buy"
 
             self.waiting_for_candle_close = False
+            self.crossover_blocked = False  # Разблокируем пересечения
             self.last_crossover_direction = None
 
     def process_data_update(self):
+        """Обработка обновлений данных в реальном времени"""
         macd_data = self.data_manager.get_macd_data()
 
         if not macd_data or 'macd' not in macd_data:
@@ -94,11 +107,14 @@ class StrategyEngine:
         current_signal = macd_data['signal']
         current_price = self.trading_engine.get_current_price()
 
-        # Detect crossover only if we have previous data
-        if self.previous_macd is not None and self.previous_signal is not None:
+        # Detect crossover only if we have previous data AND crossovers are not blocked
+        if (self.previous_macd is not None and
+                self.previous_signal is not None and
+                not self.crossover_blocked):
+
             crossover = self.detect_crossover(current_macd, current_signal)
 
-            if crossover and not self.waiting_for_candle_close:
+            if crossover:
                 # Execute immediate crossover action
                 self.execute_crossover_action(crossover, current_price)
 
@@ -107,6 +123,7 @@ class StrategyEngine:
         self.previous_signal = current_signal
 
     def process_candle_close(self):
+        """Обработка закрытия свечи таймфрейма"""
         if not self.waiting_for_candle_close:
             return
 
@@ -120,7 +137,29 @@ class StrategyEngine:
         # Check if crossover direction is maintained after candle close
         self.check_crossover_maintenance(current_macd, current_signal)
 
+    def is_new_candle_closed(self, current_candle):
+        """Проверка является ли это новой закрытой свечой"""
+        if not current_candle:
+            return False
+
+        # Для 5m таймфрейма используем timestamp из current_data
+        if self.data_manager.timeframe == "5m":
+            if not self.data_manager.current_data:
+                return False
+
+            current_candle_time = self.data_manager.current_data[-1]['timestamp']
+        else:  # 45m
+            # Для 45m используем current_45m_start
+            current_candle_time = self.data_manager.current_45m_start
+
+        if current_candle_time != self.last_processed_candle_time:
+            self.last_processed_candle_time = current_candle_time
+            return True
+
+        return False
+
     def run_strategy(self):
+        """Основной цикл стратегии"""
         self.logger.info("Стратегический движок запущен")
 
         while True:
@@ -131,8 +170,10 @@ class StrategyEngine:
                 # Check if timeframe candle has closed
                 current_candle, is_complete = self.data_manager.get_current_timeframe_status()
 
+                # Обрабатываем закрытие свечи только один раз для каждой новой свечи
                 if is_complete and self.waiting_for_candle_close:
-                    self.process_candle_close()
+                    if self.is_new_candle_closed(current_candle):
+                        self.process_candle_close()
 
                 time.sleep(1)  # Check every second
 
@@ -145,11 +186,13 @@ class StrategyEngine:
                 continue
 
     def get_status(self):
+        """Получение статуса стратегии"""
         return {
             'current_position': self.current_position_side,
             'last_crossover': self.last_crossover_direction,
             'waiting_for_close': self.waiting_for_candle_close,
             'crossover_time': self.crossover_timestamp,
             'previous_macd': self.previous_macd,
-            'previous_signal': self.previous_signal
+            'previous_signal': self.previous_signal,
+            'crossover_blocked': self.crossover_blocked
         }

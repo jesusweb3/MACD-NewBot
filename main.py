@@ -25,7 +25,8 @@ class TradingBot:
         self.data_manager = DataManager(
             symbol=self.config['SYMBOL'],
             timeframe=self.config['TIMEFRAME'],
-            logger=self.logger
+            logger=self.logger,
+            config=self.config  # Передаем конфиг в data_manager
         )
 
         self.trading_engine = TradingEngine(
@@ -132,24 +133,8 @@ class TradingBot:
                     macd_data = self.data_manager.get_macd_data()
                     websocket_price = self.data_manager.get_last_websocket_price()
 
-                    if self.config['TIMEFRAME'] == '5m':
-                        if self.data_manager.current_data:
-                            from datetime import timedelta
-                            last_candle_time = self.data_manager.current_data[-1]['timestamp']
-                            candle_start_msk = last_candle_time + timedelta(hours=3)
-                            candle_end_msk = candle_start_msk + timedelta(minutes=5)
-                            interval_info = f"{candle_start_msk.strftime('%H:%M')}-{candle_end_msk.strftime('%H:%M')} МСК (5m)"
-                        else:
-                            interval_info = "N/A (5m)"
-                    else:
-                        current_candle, _ = self.data_manager.get_current_timeframe_status()
-                        if current_candle:
-                            from datetime import timedelta
-                            interval_start = current_candle['timestamp'] + timedelta(hours=3)  # Convert to MSK
-                            interval_end = interval_start + timedelta(minutes=45)
-                            interval_info = f"{interval_start.strftime('%H:%M')}-{interval_end.strftime('%H:%M')} МСК (45m)"
-                        else:
-                            interval_info = "N/A (45m)"
+                    # Используем новый метод для получения информации об интервале
+                    interval_info = self.data_manager.get_current_interval_info()
 
                     self.logger.info(
                         f"STATUS [{interval_info}] - Позиция: {status['current_position']} | "
@@ -160,7 +145,7 @@ class TradingBot:
                         f"Ожидание: {status['waiting_for_close']}"
                     )
 
-                    time.sleep(10)
+                    time.sleep(60)
 
                 except Exception as e:
                     self.logger.error(f"Monitor thread error: {e}")
