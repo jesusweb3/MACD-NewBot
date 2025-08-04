@@ -17,14 +17,11 @@ class TradingBot:
     def __init__(self):
         load_dotenv()
 
-        # Initialize logger first
         self.logger = TradingLogger()
         self.logger.startup()
 
-        # Load configuration
         self.config = self.load_config()
 
-        # Initialize components
         self.data_manager = DataManager(
             symbol=self.config['SYMBOL'],
             timeframe=self.config['TIMEFRAME'],
@@ -49,7 +46,6 @@ class TradingBot:
         self.running = False
         self.threads = []
 
-        # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
@@ -67,7 +63,6 @@ class TradingBot:
                 'MACD_SIGNAL': int(os.getenv('MACD_SIGNAL', 7))
             }
 
-            # Validate required fields
             if not config['BYBIT_API_KEY'] or not config['BYBIT_SECRET']:
                 raise ValueError("Bybit API credentials are required")
 
@@ -110,7 +105,6 @@ class TradingBot:
     def start_strategy_thread(self):
         def strategy_worker():
             try:
-                # Wait for initial data
                 while self.running:
                     macd_data = self.data_manager.get_macd_data()
                     if macd_data and 'macd' in macd_data:
@@ -134,26 +128,20 @@ class TradingBot:
         def monitor_worker():
             while self.running:
                 try:
-                    # Log status every 5 minutes with MACD values
                     status = self.strategy_engine.get_status()
                     macd_data = self.data_manager.get_macd_data()
-                    # Получаем последнюю цену из WebSocket данных (на основе которой рассчитан MACD)
                     websocket_price = self.data_manager.get_last_websocket_price()
 
-                    # Get current interval info based on timeframe
                     if self.config['TIMEFRAME'] == '5m':
-                        # For 5m timeframe, show current 5m candle time
                         if self.data_manager.current_data:
                             from datetime import timedelta
                             last_candle_time = self.data_manager.current_data[-1]['timestamp']
-                            # Convert to MSK
                             candle_start_msk = last_candle_time + timedelta(hours=3)
                             candle_end_msk = candle_start_msk + timedelta(minutes=5)
                             interval_info = f"{candle_start_msk.strftime('%H:%M')}-{candle_end_msk.strftime('%H:%M')} МСК (5m)"
                         else:
                             interval_info = "N/A (5m)"
                     else:
-                        # For 45m timeframe, use existing logic
                         current_candle, _ = self.data_manager.get_current_timeframe_status()
                         if current_candle:
                             from datetime import timedelta
@@ -172,7 +160,7 @@ class TradingBot:
                         f"Ожидание: {status['waiting_for_close']}"
                     )
 
-                    time.sleep(10)  # 5 minutes
+                    time.sleep(10)
 
                 except Exception as e:
                     self.logger.error(f"Monitor thread error: {e}")
@@ -186,16 +174,14 @@ class TradingBot:
         try:
             self.running = True
 
-            # Start all threads
             self.start_data_thread()
-            time.sleep(5)  # Wait for data manager to initialize
+            time.sleep(5)
 
             self.start_strategy_thread()
             self.start_monitor_thread()
 
             self.logger.info("Все системы запущены. Нажмите Ctrl+C для остановки.")
 
-            # Keep main thread alive
             while self.running:
                 time.sleep(1)
 
@@ -213,11 +199,9 @@ class TradingBot:
         self.logger.info("Остановка торгового бота...")
         self.running = False
 
-        # Stop data manager
         if hasattr(self, 'data_manager'):
             self.data_manager.stop()
 
-        # Wait for threads to finish
         for thread in self.threads:
             if thread.is_alive():
                 thread.join(timeout=5)
