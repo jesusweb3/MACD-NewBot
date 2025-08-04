@@ -19,7 +19,6 @@ class StrategyEngine:
 
         # Новые переменные для правильной логики
         self.crossover_blocked = False  # Блокировка пересечений до конца свечи
-        self.candle_close_processed = False  # Обработка закрытия свечи
         self.last_processed_candle_time = None  # Время последней обработанной свечи
 
     def detect_crossover(self, current_macd, current_signal):
@@ -27,24 +26,30 @@ class StrategyEngine:
         if self.previous_macd is None or self.previous_signal is None:
             return None
 
-        # Previous state
+        # Previous state: где был MACD относительно Signal
         prev_above = self.previous_macd > self.previous_signal
 
-        # Current state
+        # Current state: где сейчас MACD относительно Signal
         curr_above = current_macd > current_signal
 
-        # Detect crossover
+        # Detect crossover: изменение состояния
         if not prev_above and curr_above:
-            return "BULLISH"  # MACD crossed above Signal
+            # MACD был ниже Signal, теперь выше - бычье пересечение
+            self.logger.info(
+                f"DEBUG CROSSOVER: BULLISH detected - Prev: {self.previous_macd:.6f} < {self.previous_signal:.6f} -> Curr: {current_macd:.6f} > {current_signal:.6f}")
+            return "BULLISH"
         elif prev_above and not curr_above:
-            return "BEARISH"  # MACD crossed below Signal
+            # MACD был выше Signal, теперь ниже - медвежье пересечение
+            self.logger.info(
+                f"DEBUG CROSSOVER: BEARISH detected - Prev: {self.previous_macd:.6f} > {self.previous_signal:.6f} -> Curr: {current_macd:.6f} < {current_signal:.6f}")
+            return "BEARISH"
 
         return None
 
-    def execute_crossover_action(self, direction, current_price):
+    def execute_crossover_action(self, direction, current_price, current_macd, current_signal):
         """Выполнение действий при пересечении"""
         if direction == "BULLISH":
-            self.logger.macd_crossover("BULLISH", self.previous_macd, self.previous_signal, current_price)
+            self.logger.macd_crossover("BULLISH", current_macd, current_signal, current_price)
             success = self.trading_engine.open_long()
             if success:
                 self.current_position_side = "Buy"
@@ -54,7 +59,7 @@ class StrategyEngine:
                 self.crossover_timestamp = datetime.now()
 
         elif direction == "BEARISH":
-            self.logger.macd_crossover("BEARISH", self.previous_macd, self.previous_signal, current_price)
+            self.logger.macd_crossover("BEARISH", current_macd, current_signal, current_price)
             success = self.trading_engine.open_short()
             if success:
                 self.current_position_side = "Sell"
@@ -105,7 +110,6 @@ class StrategyEngine:
 
         current_macd = macd_data['macd']
         current_signal = macd_data['signal']
-        current_price = self.trading_engine.get_current_price()
 
         # Detect crossover only if we have previous data AND crossovers are not blocked
         if (self.previous_macd is not None and
@@ -115,8 +119,9 @@ class StrategyEngine:
             crossover = self.detect_crossover(current_macd, current_signal)
 
             if crossover:
-                # Execute immediate crossover action
-                self.execute_crossover_action(crossover, current_price)
+                current_price = self.trading_engine.get_current_price()
+                # Execute immediate crossover action (БЕЗ мгновенной проверки сохранения!)
+                self.execute_crossover_action(crossover, current_price, current_macd, current_signal)
 
         # Update previous values for next iteration
         self.previous_macd = current_macd
