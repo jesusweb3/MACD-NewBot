@@ -20,7 +20,86 @@ class TradingEngine:
         )
 
         self.current_position = None
+
+        # Instrument info for proper quantity formatting
+        self.qty_step = None
+        self.min_order_qty = None
+        self.max_order_qty = None
+        self.tick_size = None
+
+        # Get instrument info and setup leverage
+        self.get_instrument_info()
         self.setup_leverage()
+
+    def get_instrument_info(self):
+        """Get instrument specifications for proper order formatting"""
+        try:
+            response = self.session.get_instruments_info(
+                category="linear",
+                symbol=self.symbol
+            )
+
+            if response['retCode'] == 0 and response['result']['list']:
+                instrument = response['result']['list'][0]
+
+                # Extract lot size filter info
+                lot_size_filter = instrument['lotSizeFilter']
+                self.qty_step = float(lot_size_filter['qtyStep'])
+                self.min_order_qty = float(lot_size_filter['minOrderQty'])
+                self.max_order_qty = float(lot_size_filter['maxOrderQty'])
+
+                # Extract price filter info
+                price_filter = instrument['priceFilter']
+                self.tick_size = float(price_filter['tickSize'])
+
+                self.logger.info(
+                    f"Параметры {self.symbol}: QtyStep={self.qty_step}, MinQty={self.min_order_qty}, TickSize={self.tick_size}")
+
+            else:
+                self.logger.error(
+                    f"Не удалось получить информацию об инструменте: {response.get('retMsg', 'Unknown error')}")
+                # Fallback values for ETHUSDT
+                self.qty_step = 0.001
+                self.min_order_qty = 0.001
+                self.max_order_qty = 1000000
+                self.tick_size = 0.01
+                self.logger.warning(f"Используются стандартные параметры для {self.symbol}")
+
+        except Exception as e:
+            self.logger.api_error("Bybit", f"Ошибка получения информации об инструменте: {e}")
+            # Fallback values
+            self.qty_step = 0.001
+            self.min_order_qty = 0.001
+            self.max_order_qty = 1000000
+            self.tick_size = 0.01
+            self.logger.warning(f"Используются стандартные параметры для {self.symbol}")
+
+    def round_quantity(self, quantity):
+        """Round quantity according to instrument specifications"""
+        if self.qty_step is None:
+            return round(quantity, 3)  # Fallback
+
+        # Round to nearest qty_step
+        precision = len(str(self.qty_step).split('.')[-1]) if '.' in str(self.qty_step) else 0
+        rounded_qty = round(quantity / self.qty_step) * self.qty_step
+        rounded_qty = round(rounded_qty, precision)
+
+        # Ensure it's within min/max limits
+        if rounded_qty < self.min_order_qty:
+            rounded_qty = self.min_order_qty
+        elif rounded_qty > self.max_order_qty:
+            rounded_qty = self.max_order_qty
+
+        return rounded_qty
+
+    def round_price(self, price):
+        """Round price according to instrument specifications"""
+        if self.tick_size is None:
+            return round(price, 2)  # Fallback
+
+        precision = len(str(self.tick_size).split('.')[-1]) if '.' in str(self.tick_size) else 0
+        rounded_price = round(price / self.tick_size) * self.tick_size
+        return round(rounded_price, precision)
 
     def setup_leverage(self):
         try:
@@ -104,9 +183,16 @@ class TradingEngine:
             return 0
 
     def calculate_quantity(self, price):
+        """Calculate and properly round order quantity"""
         total_value = self.position_size * self.leverage
-        quantity = total_value / price
-        return round(quantity, 3)
+        raw_quantity = total_value / price
+
+        # Round according to instrument specifications
+        rounded_quantity = self.round_quantity(raw_quantity)
+
+        self.logger.info(f"Расчет количества: {total_value} USDT / {price} = {raw_quantity:.6f} -> {rounded_quantity}")
+
+        return rounded_quantity
 
     def close_position(self):
         position = self.get_current_position()
@@ -117,12 +203,15 @@ class TradingEngine:
             # Close position by placing opposite order
             opposite_side = "Sell" if position['side'] == "Buy" else "Buy"
 
+            # Round the position size properly
+            rounded_size = self.round_quantity(position['size'])
+
             response = self.session.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=opposite_side,
                 orderType="Market",
-                qty=str(position['size']),
+                qty=str(rounded_size),
                 reduceOnly=True
             )
 
@@ -159,6 +248,11 @@ class TradingEngine:
 
         if balance < self.position_size:
             self.logger.insufficient_funds(self.position_size, balance)
+            return False
+
+        # Validate quantity is within limits
+        if quantity < self.min_order_qty:
+            self.logger.error(f"Количество {quantity} меньше минимального {self.min_order_qty}")
             return False
 
         try:
