@@ -137,6 +137,8 @@ class TradingBot:
                     # Log status every 5 minutes with MACD values
                     status = self.strategy_engine.get_status()
                     macd_data = self.data_manager.get_macd_data()
+                    # Получаем последнюю цену из WebSocket данных (на основе которой рассчитан MACD)
+                    websocket_price = self.data_manager.get_last_websocket_price()
 
                     # Get current interval info based on timeframe
                     if self.config['TIMEFRAME'] == '5m':
@@ -163,9 +165,10 @@ class TradingBot:
 
                     self.logger.info(
                         f"STATUS [{interval_info}] - Позиция: {status['current_position']} | "
-                        f"MACD: {macd_data.get('macd', 0):.6f} | "
-                        f"Signal: {macd_data.get('signal', 0):.6f} | "
-                        f"Histogram: {macd_data.get('histogram', 0):.6f} | "
+                        f"Price: {websocket_price} | "
+                        f"MACD: {macd_data.get('macd', 0):.2f} | "
+                        f"Signal: {macd_data.get('signal', 0):.2f} | "
+                        f"Histogram: {macd_data.get('histogram', 0):.2f} | "
                         f"Ожидание: {status['waiting_for_close']}"
                     )
 

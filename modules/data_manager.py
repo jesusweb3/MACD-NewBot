@@ -8,15 +8,6 @@ import json
 import threading
 import time
 from datetime import datetime, timezone, timedelta
-
-# Проверяем доступность Futures WebSocket клиента
-try:
-    from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
-    FUTURES_WS_AVAILABLE = True
-except ImportError:
-    UMFuturesWebsocketClient = None
-    FUTURES_WS_AVAILABLE = False
-
 import websocket
 
 
@@ -26,16 +17,15 @@ class DataManager:
         self.timeframe = timeframe  # "5m" or "45m"
         self.logger = logger
         self.client = Client()
-        self.ws_client = None
         self.ws = None
 
         if self.timeframe == "5m":
-            # Только массив цен close как в тестовом модуле
+            # Только массив цен close
             self.klines_data = []
             self.current_data = []
             self.ws_stream = f"{self.symbol.lower()}@kline_5m"
         else:  # 45m
-            # Простая логика как в тестовом модуле
+            # Простая логика
             self.klines_45m = []
             self.current_45m_start = None
             self.last_45m_start = None
@@ -45,6 +35,9 @@ class DataManager:
         self.macd_data = {}
         self.running = False
         self.lock = threading.Lock()
+
+        # Добавляем переменную для отслеживания последней цены WebSocket
+        self.last_websocket_price = 0.0
 
         # For interval tracking and anti-spam logging
         self.last_interval_start = None
@@ -67,12 +60,11 @@ class DataManager:
     def get_historical_data(self, limit=200):
         try:
             if self.timeframe == "5m":
-                # ТОЧНО как в тестовом модуле 5m
 
                 # Получаем серверное время Binance для синхронизации
                 server_time = self.client.get_server_time()
                 self.logger.info(
-                    f"[SYNC] Серверное время Binance: {pd.to_datetime(server_time['serverTime'], unit='ms')}")
+                    f"Серверное время Binance: {pd.to_datetime(server_time['serverTime'], unit='ms')}")
 
                 # Получаем исторические свечи с учетом серверного времени
                 klines = self.client.futures_klines(
@@ -99,11 +91,15 @@ class DataManager:
                 # Заполняем current_data для совместимости с остальным кодом
                 self.current_data = df.to_dict('records')
 
+                # Устанавливаем последнюю историческую цену как начальную WebSocket цену
+                if self.klines_data:
+                    self.last_websocket_price = self.klines_data[-1]
+
                 self.last_sync_time = datetime.now()
 
                 self.logger.info(f"Загружено {len(self.klines_data)} исторических свечей для {self.symbol}")
 
-            else:  # 45m - ТОЧНО как в тестовом модуле 45m
+            else:  # 45m
                 # Получаем серверное время Binance
                 server_time = self.client.get_server_time()
                 now = pd.to_datetime(server_time['serverTime'], unit='ms', utc=True)
@@ -130,7 +126,7 @@ class DataManager:
 
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
 
-                # Преобразуем в 45м свечи ТОЧНО как в тестовом модуле
+                # Преобразуем в 45м свечие
                 self.convert_15m_to_45m(df)
 
                 # Показываем анализ интервалов
@@ -138,6 +134,10 @@ class DataManager:
 
                 # Доформировываем текущий интервал
                 self.complete_current_interval(self.client, now)
+
+                # Устанавливаем последнюю историческую цену как начальную WebSocket цену
+                if self.klines_45m:
+                    self.last_websocket_price = self.klines_45m[-1]
 
                 self.logger.info(f"ЗАГРУЖЕНО: {len(self.klines_45m)} исторических 45м свечей")
 
@@ -161,7 +161,7 @@ class DataManager:
         self.logger.info(f"Прошло времени в текущем интервале: {time_in_interval:.1f} минут")
 
     def convert_15m_to_45m(self, df_15m):
-        """Преобразование 15м в 45м ТОЧНО как в тестовом модуле"""
+        """Преобразование 15м в 45м"""
         self.klines_45m = []
         grouped_candles = {}
 
@@ -294,7 +294,7 @@ class DataManager:
 
     @staticmethod
     def calculate_ema(prices, period):
-        """Расчет EMA ТОЧНО как в тестовых модулях"""
+        """Расчет EMA"""
         prices = np.array(prices, dtype=np.float64)
 
         if len(prices) < period:
@@ -345,7 +345,6 @@ class DataManager:
 
     def calculate_macd(self):
         """Расчет MACD"""
-        # Используем параметры MACD из тестовых модулей
         fast_period = 12
         slow_period = 26
         signal_period = 7
@@ -416,6 +415,9 @@ class DataManager:
                 close_price = float(kline['c'])
                 is_kline_closed = kline['x']
 
+                # Сохраняем последнюю цену из WebSocket
+                self.last_websocket_price = close_price
+
                 if is_kline_closed:
                     # Свеча закрылась - добавляем новую свечу
                     self.klines_data.append(close_price)
@@ -454,6 +456,9 @@ class DataManager:
                 kline_start_time = pd.to_datetime(int(kline['t']), unit='ms', utc=True)
                 is_kline_closed = kline['x']
 
+                # Сохраняем последнюю цену из WebSocket
+                self.last_websocket_price = close_price
+
                 # Проверяем смену 45м интервала
                 self.check_45m_interval_change(kline_start_time)
 
@@ -474,38 +479,6 @@ class DataManager:
             self.logger.error(f"Ошибка WebSocket: {e}")
 
     def start_websocket(self):
-        if FUTURES_WS_AVAILABLE and UMFuturesWebsocketClient is not None:
-            try:
-                # ВАЖНО: UMFuturesWebsocketClient автоматически использует фьючерсный endpoint
-                if self.timeframe == "5m":
-                    self.ws_client = UMFuturesWebsocketClient(
-                        on_message=self.handle_kline_message_5m
-                    )
-                else:  # 45m
-                    self.ws_client = UMFuturesWebsocketClient(
-                        on_message=self.handle_kline_message_45m
-                    )
-
-                # Подписываемся на соответствующий stream
-                if self.timeframe == "5m":
-                    self.ws_client.kline(
-                        symbol=self.symbol.lower(),
-                        interval=self.timeframe
-                    )
-                else:  # 45m слушаем 5m данные
-                    self.ws_client.kline(
-                        symbol=self.symbol.lower(),
-                        interval='5m'
-                    )
-
-                self.logger.info(f"FUTURES WebSocket подключен для {self.symbol} {self.timeframe}")
-                self.running = True
-                return
-
-            except Exception as futures_error:
-                self.logger.error(f"Ошибка Futures WebSocket подключения: {futures_error}")
-
-        # Fallback to manual futures websocket if UMFuturesWebsocketClient failed
         def on_message(_, message):
             if self.timeframe == "5m":
                 self.handle_kline_message_5m(_, message)
@@ -522,10 +495,10 @@ class DataManager:
                 self.start_websocket()
 
         def on_open(_):
-            self.logger.info("FUTURES WebSocket соединение открыто (manual)")
+            self.logger.info("FUTURES WebSocket соединение открыто")
 
         stream = self.ws_stream
-        # ВАЖНО: Используем ФЬЮЧЕРСНЫЙ WebSocket для получения фьючерсных цен
+        # Используем ФЬЮЧЕРСНЫЙ WebSocket для получения фьючерсных цен
         socket_url = f"wss://fstream.binance.com/ws/{stream}"
 
         self.ws = websocket.WebSocketApp(
@@ -546,15 +519,12 @@ class DataManager:
                 if not self.current_data:
                     return None, False
 
-                # Return last 5m candle and its completion status
                 last_candle = self.current_data[-1]
 
-                # For 5m, we can check if current time has passed the candle's expected end
                 from datetime import timedelta
                 current_time = datetime.now(timezone.utc)
                 candle_start = last_candle['timestamp']
 
-                # Ensure timezone-aware comparison
                 if candle_start.tzinfo is None:
                     candle_start = candle_start.replace(tzinfo=timezone.utc)
 
@@ -563,7 +533,6 @@ class DataManager:
 
                 return last_candle, is_complete
             else:
-                # 45m logic - check if 45m interval completed
                 if not self.current_45m_candle:
                     return None, False
 
@@ -579,9 +548,12 @@ class DataManager:
         with self.lock:
             return self.macd_data.copy()
 
+    def get_last_websocket_price(self):
+        """Получить последнюю цену из WebSocket данных"""
+        with self.lock:
+            return self.last_websocket_price
+
     def stop(self):
         self.running = False
-        if self.ws_client:
-            self.ws_client.stop()
         if self.ws:
             self.ws.close()
