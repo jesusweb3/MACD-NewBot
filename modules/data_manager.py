@@ -234,27 +234,35 @@ class DataManager:
             new_interval = DataManager.get_5m_interval_start(kline_start_time)
             interval_changed = (new_interval != self.current_interval_start)
 
+            # ИСПРАВЛЕНИЕ: Обрабатываем смену интервала НЕЗАВИСИМО от is_kline_closed
+            if interval_changed and self.current_interval_start is not None:
+                # Интервал изменился - значит предыдущий закрылся
+                old_msk = DataManager.to_msk_time(self.current_interval_start)
+                new_msk = DataManager.to_msk_time(new_interval)
+
+                # Логируем закрытие предыдущего интервала
+                final_price = self.klines_data[-1] if self.klines_data else close_price
+                self.logger.info(
+                    f"5М ИНТЕРВАЛ ЗАКРЫТ: {old_msk.strftime('%H:%M')}-{(old_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК | Close: {final_price}")
+
+                # Логируем открытие нового интервала
+                self.logger.info(
+                    f"5М ИНТЕРВАЛ ОТКРЫТ: {new_msk.strftime('%H:%M')}-{(new_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК")
+
+            # Обновляем текущий интервал при любой смене
+            if interval_changed:
+                self.current_interval_start = new_interval
+
+            # Обрабатываем данные свечи
             if is_kline_closed:
-                if interval_changed:
-                    # Новый интервал начался
-                    old_msk = DataManager.to_msk_time(self.current_interval_start)
-                    new_msk = DataManager.to_msk_time(new_interval)
-
-                    self.logger.info(
-                        f"5М ИНТЕРВАЛ ЗАКРЫТ: {old_msk.strftime('%H:%M')}-{(old_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК | Close: {close_price}")
-                    self.logger.info(
-                        f"5М ИНТЕРВАЛ ОТКРЫТ: {new_msk.strftime('%H:%M')}-{(new_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК")
-
-                    self.current_interval_start = new_interval
-
-                # Добавляем новую свечу
+                # Закрытая свеча - добавляем в историю
                 self.klines_data.append(close_price)
 
                 # Ограничиваем размер
                 if len(self.klines_data) > 250:
                     self.klines_data = self.klines_data[-200:]
             else:
-                # Обновляем текущую свечу
+                # Открытая свеча - обновляем последнее значение
                 if len(self.klines_data) > 0:
                     self.klines_data[-1] = close_price
                 else:
