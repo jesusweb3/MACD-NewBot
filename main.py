@@ -26,7 +26,7 @@ class TradingBot:
             symbol=self.config['SYMBOL'],
             timeframe=self.config['TIMEFRAME'],
             logger=self.logger,
-            config=self.config  # Передаем конфиг в data_manager
+            config=self.config
         )
 
         self.trading_engine = TradingEngine(
@@ -106,9 +106,11 @@ class TradingBot:
     def start_strategy_thread(self):
         def strategy_worker():
             try:
+                # Ждем пока данные загрузятся
                 while self.running:
                     macd_data = self.data_manager.get_macd_data()
                     if macd_data and 'macd' in macd_data:
+                        self.logger.info("MACD данные готовы, запускаем стратегию")
                         break
                     time.sleep(1)
 
@@ -116,7 +118,7 @@ class TradingBot:
                     self.strategy_engine.run_strategy()
 
             except Exception as e:
-                self.logger.error(f"Strategy thread error: {e}")
+                self.logger.error(f"Ошибка стратегического потока: {e}")
                 if self.running:
                     time.sleep(10)
                     self.start_strategy_thread()
@@ -132,23 +134,44 @@ class TradingBot:
                     status = self.strategy_engine.get_status()
                     macd_data = self.data_manager.get_macd_data()
                     websocket_price = self.data_manager.get_last_websocket_price()
-
-                    # Используем новый метод для получения информации об интервале
                     interval_info = self.data_manager.get_current_interval_info()
 
+                    # Формируем статус строку
+                    state_ru = {
+                        'waiting_first_cross': 'Ждем первое пересечение',
+                        'blocked_until_close': 'Блокировка до закрытия',
+                        'waiting_opposite_cross': 'Ждем обратное пересечение'
+                    }.get(status.get('state', ''), status.get('state', 'N/A'))
+
+                    position_info = status.get('current_position', 'Нет')
+                    if position_info and status.get('position_direction'):
+                        position_info = f"{position_info} ({status['position_direction']})"
+
+                    # Форматируем MACD данные
+                    macd_str = f"{macd_data.get('macd', 0):.6f}" if macd_data.get('macd') else "N/A"
+                    signal_str = f"{macd_data.get('signal', 0):.6f}" if macd_data.get('signal') else "N/A"
+                    histogram_str = f"{macd_data.get('histogram', 0):.6f}" if macd_data.get('histogram') else "N/A"
+
                     self.logger.info(
-                        f"STATUS [{interval_info}] - Позиция: {status['current_position']} | "
-                        f"Price: {websocket_price} | "
-                        f"MACD: {macd_data.get('macd', 0):.2f} | "
-                        f"Signal: {macd_data.get('signal', 0):.2f} | "
-                        f"Histogram: {macd_data.get('histogram', 0):.2f} | "
-                        f"Ожидание: {status['waiting_for_close']}"
+                        f"STATUS [{interval_info}] | "
+                        f"Состояние: {state_ru} | "
+                        f"Позиция: {position_info} | "
+                        f"Цена: {websocket_price} | "
+                        f"MACD: {macd_str} | "
+                        f"Signal: {signal_str} | "
+                        f"Histogram: {histogram_str}"
                     )
+
+                    # Дополнительная информация при наличии
+                    if status.get('crossover_interval'):
+                        crossover_time = status.get('crossover_time')
+                        time_str = crossover_time.strftime('%H:%M:%S') if crossover_time else 'N/A'
+                        self.logger.info(f"Последнее пересечение: {time_str} в интервале {status['crossover_interval']}")
 
                     time.sleep(60)
 
                 except Exception as e:
-                    self.logger.error(f"Monitor thread error: {e}")
+                    self.logger.error(f"Ошибка мониторинга: {e}")
                     time.sleep(60)
 
         thread = threading.Thread(target=monitor_worker, daemon=True)
@@ -159,21 +182,23 @@ class TradingBot:
         try:
             self.running = True
 
+            # Запуск потоков
             self.start_data_thread()
-            time.sleep(5)
+            time.sleep(5)  # Даем время на подключение
 
             self.start_strategy_thread()
             self.start_monitor_thread()
 
             self.logger.info("Все системы запущены. Нажмите Ctrl+C для остановки.")
 
+            # Основной цикл
             while self.running:
                 time.sleep(1)
 
         except KeyboardInterrupt:
-            self.logger.info("Shutdown initiated by user")
+            self.logger.info("Остановка по запросу пользователя")
         except Exception as e:
-            self.logger.critical(f"Critical error: {e}")
+            self.logger.critical(f"Критическая ошибка: {e}")
         finally:
             self.stop()
 
@@ -184,9 +209,11 @@ class TradingBot:
         self.logger.info("Остановка торгового бота...")
         self.running = False
 
+        # Останавливаем компоненты
         if hasattr(self, 'data_manager'):
             self.data_manager.stop()
 
+        # Ждем завершения потоков
         for thread in self.threads:
             if thread.is_alive():
                 thread.join(timeout=5)

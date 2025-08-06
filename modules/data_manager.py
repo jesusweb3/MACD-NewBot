@@ -7,48 +7,40 @@ from binance.exceptions import BinanceAPIException
 import json
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import timezone, timedelta
 import websocket
 
 
 class DataManager:
     def __init__(self, symbol, timeframe, logger, config):
         self.symbol = symbol
-        self.timeframe = timeframe  # "5m" or "45m"
+        self.timeframe = timeframe
         self.logger = logger
         self.config = config
         self.client = Client()
         self.ws = None
 
-        if self.timeframe == "5m":
-            # Только массив цен close
-            self.klines_data = []
-            self.current_data = []
-            self.ws_stream = f"{self.symbol.lower()}@kline_5m"
-            self.current_interval_start = None
-        else:  # 45m
-            # Простая логика
-            self.klines_45m = []
-            self.current_45m_start = None
-            self.last_45m_start = None
-            self.current_45m_candle = None
-            self.ws_stream = f"{self.symbol.lower()}@kline_5m"
-
+        # Общие данные
         self.macd_data = {}
         self.running = False
         self.lock = threading.Lock()
-
-        # Добавляем переменную для отслеживания последней цены WebSocket
         self.last_websocket_price = 0.0
 
-        # For interval tracking and anti-spam logging
-        self.last_interval_start = None
-        self.last_data_signature = None
-        self.last_sync_time = None
+        if self.timeframe == "5m":
+            # 5м данные
+            self.klines_data = []
+            self.current_interval_start = None
+            self.ws_stream = f"{self.symbol.lower()}@kline_5m"
+        else:  # 45m
+            # 45м данные
+            self.klines_45m = []
+            self.current_45m_start = None
+            self.current_45m_candle = None
+            self.ws_stream = f"{self.symbol.lower()}@kline_5m"  # Строим из 5м
 
     @staticmethod
     def get_45m_interval_start(timestamp):
-        """Получить начало 45м интервала для заданного времени"""
+        """Получить начало 45м интервала"""
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
 
@@ -61,7 +53,7 @@ class DataManager:
 
     @staticmethod
     def get_5m_interval_start(timestamp):
-        """Получить начало 5м интервала для заданного времени"""
+        """Получить начало 5м интервала"""
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
 
@@ -74,69 +66,46 @@ class DataManager:
 
     @staticmethod
     def to_msk_time(utc_timestamp):
-        """Конвертация UTC времени в МСК"""
+        """Конвертация UTC в МСК"""
         if utc_timestamp.tzinfo is None:
             utc_timestamp = utc_timestamp.replace(tzinfo=timezone.utc)
-        msk_time = utc_timestamp + timedelta(hours=3)
-        return msk_time
+        return utc_timestamp + timedelta(hours=3)
 
     def get_historical_data(self, limit=200):
         try:
+            server_time = self.client.get_server_time()
+            server_dt = pd.to_datetime(server_time['serverTime'], unit='ms', utc=True)
+            server_msk = DataManager.to_msk_time(server_dt)
+            self.logger.info(f"Серверное время Binance: {server_msk.strftime('%Y-%m-%d %H:%M:%S')} МСК")
+
             if self.timeframe == "5m":
-
-                # Получаем серверное время Binance для синхронизации
-                server_time = self.client.get_server_time()
-                server_dt = pd.to_datetime(server_time['serverTime'], unit='ms', utc=True)
-                server_msk = DataManager.to_msk_time(server_dt)
-                self.logger.info(f"Серверное время Binance: {server_msk.strftime('%Y-%m-%d %H:%M:%S')} МСК")
-
-                # Получаем исторические свечи с учетом серверного времени
                 klines = self.client.futures_klines(
                     symbol=self.symbol,
                     interval=self.timeframe,
                     limit=limit
                 )
 
-                # Преобразуем в DataFrame
                 df = pd.DataFrame(klines, columns=[
                     'timestamp', 'open', 'high', 'low', 'close', 'volume',
                     'close_time', 'quote_volume', 'trades', 'taker_buy_volume',
                     'taker_buy_quote_volume', 'ignore'
                 ])
 
-                # Конвертируем типы данных
                 df['close'] = df['close'].astype(float)
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-                df['close_time'] = pd.to_datetime(df['close_time'], unit='ms', utc=True)
 
-                # Сохраняем только цены close
                 self.klines_data = df['close'].tolist()
-
-                # Заполняем current_data для совместимости с остальным кодом
-                self.current_data = df.to_dict('records')
-
-                # Устанавливаем текущий интервал
                 self.current_interval_start = DataManager.get_5m_interval_start(server_dt)
 
-                # Устанавливаем последнюю историческую цену как начальную WebSocket цену
                 if self.klines_data:
                     self.last_websocket_price = self.klines_data[-1]
 
-                self.last_sync_time = datetime.now()
-
-                self.logger.info(f"Загружено {len(self.klines_data)} исторических свечей для {self.symbol}")
+                self.logger.info(f"Загружено {len(self.klines_data)} исторических 5м свечей")
 
             else:  # 45m
-                # Получаем серверное время Binance
-                server_time = self.client.get_server_time()
-                now = pd.to_datetime(server_time['serverTime'], unit='ms', utc=True)
-                now_msk = DataManager.to_msk_time(now)
-                self.logger.info(f"[SYNC] Серверное время Binance: {now_msk.strftime('%Y-%m-%d %H:%M:%S')} МСК")
+                self.current_45m_start = DataManager.get_45m_interval_start(server_dt)
 
-                self.current_45m_start = DataManager.get_45m_interval_start(now)
-                self.last_45m_start = self.current_45m_start
-
-                # Запрашиваем исторические 15м свечи ФЬЮЧЕРСЫ
+                # Получаем 15м данные для построения 45м
                 klines_15m = self.client.futures_klines(
                     symbol=self.symbol,
                     interval='15m',
@@ -154,48 +123,21 @@ class DataManager:
 
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
 
-                # Преобразуем в 45м свечие
                 self.convert_15m_to_45m(df)
+                self.complete_current_45m_interval(server_dt)
 
-                # Показываем анализ интервалов
-                self.show_interval_analysis(now)
-
-                # Доформировываем текущий интервал
-                self.complete_current_interval(self.client, now)
-
-                # Устанавливаем последнюю историческую цену как начальную WebSocket цену
                 if self.klines_45m:
                     self.last_websocket_price = self.klines_45m[-1]
 
-                self.logger.info(f"ЗАГРУЖЕНО: {len(self.klines_45m)} исторических 45м свечей")
+                self.logger.info(f"Загружено {len(self.klines_45m)} исторических 45м свечей")
 
-            # Рассчитываем начальный MACD
             self.calculate_macd()
 
-        except BinanceAPIException as api_error:
-            self.logger.error(f"Binance API error: {str(api_error)}")
-
-    def show_interval_analysis(self, now):
-        """Показать анализ интервалов"""
-        last_complete_interval = self.current_45m_start - timedelta(minutes=45)
-        time_in_interval = (now - self.current_45m_start).total_seconds() / 60
-
-        # Конвертируем в МСК
-        now_msk = DataManager.to_msk_time(now)
-        last_complete_msk = DataManager.to_msk_time(last_complete_interval)
-        current_start_msk = DataManager.to_msk_time(self.current_45m_start)
-        current_end_msk = current_start_msk + timedelta(minutes=45)
-
-        self.logger.info("АНАЛИЗ ИНТЕРВАЛОВ:")
-        self.logger.info(f"Текущее время: {now_msk.strftime('%H:%M:%S')} МСК")
-        self.logger.info(
-            f"Последний полный 45м интервал: {last_complete_msk.strftime('%H:%M')} - {(last_complete_msk + timedelta(minutes=45)).strftime('%H:%M')} МСК")
-        self.logger.info(
-            f"Текущий интервал: {current_start_msk.strftime('%H:%M')} - {current_end_msk.strftime('%H:%M')} МСК")
-        self.logger.info(f"Прошло времени в текущем интервале: {time_in_interval:.1f} минут")
+        except BinanceAPIException as e:
+            self.logger.error(f"Binance API error: {str(e)}")
 
     def convert_15m_to_45m(self, df_15m):
-        """Преобразование 15м в 45м"""
+        """Конвертация 15м в 45м свечи"""
         self.klines_45m = []
         grouped_candles = {}
 
@@ -207,45 +149,29 @@ class DataManager:
 
             grouped_candles[interval_start].append(row)
 
-        # Формируем только полные исторические 45м свечи (исключаем текущий интервал)
+        # Создаем только полные исторические интервалы (исключаем текущий)
         for interval_start in sorted(grouped_candles.keys()):
             candles = grouped_candles[interval_start]
 
-            # Пропускаем текущий интервал - он будет доформирован отдельно
-            if interval_start >= self.current_45m_start:
+            if interval_start >= self.current_45m_start or len(candles) < 3:
                 continue
 
-            # Пропускаем неполные интервалы
-            if len(candles) < 3:
-                continue
+            self.klines_45m.append(candles[-1]['close'])
 
-            candle_45m = {
-                'timestamp': interval_start,
-                'open': candles[0]['open'],
-                'high': max(c['high'] for c in candles),
-                'low': min(c['low'] for c in candles),
-                'close': candles[-1]['close'],
-                'volume': sum(c['volume'] for c in candles)
-            }
-
-            self.klines_45m.append(candle_45m['close'])
-
-    def complete_current_interval(self, client, now):
-        """Доформирование текущего 45м интервала"""
+    def complete_current_45m_interval(self, server_dt):
+        """Достроить текущий 45м интервал из 5м данных"""
         try:
-            time_in_interval = (now - self.current_45m_start).total_seconds() / 60
+            time_in_interval = (server_dt - self.current_45m_start).total_seconds() / 60
             completed_5m_candles = int(time_in_interval // 5)
 
-            if completed_5m_candles == 0:
-                self.logger.info(f"Дополнительные 5м свечи: 0 (первая 5м свеча ещё не завершена)")
-                self.current_45m_candle = {'close': 0.0, 'high': 0.0, 'low': 999999.0, 'open': 0.0, 'volume': 0.0}
+            if completed_5m_candles <= 0:
+                self.current_45m_candle = {'open': 0.0, 'high': 0.0, 'low': 999999.0, 'close': 0.0, 'volume': 0.0}
                 self.klines_45m.append(0.0)
                 return
 
-            # Запрашиваем завершённые 5м свечи
             start_time = int(self.current_45m_start.timestamp() * 1000)
 
-            klines_5m = client.futures_klines(
+            klines_5m = self.client.futures_klines(
                 symbol=self.symbol,
                 interval='5m',
                 startTime=start_time,
@@ -253,7 +179,6 @@ class DataManager:
             )
 
             if klines_5m:
-                # Берём только нужное количество свечей
                 klines_to_use = klines_5m[:completed_5m_candles]
 
                 self.current_45m_candle = {
@@ -266,30 +191,20 @@ class DataManager:
 
                 self.klines_45m.append(self.current_45m_candle['close'])
 
-                last_completed_time = self.current_45m_start + timedelta(minutes=completed_5m_candles * 5)
-                last_completed_msk = DataManager.to_msk_time(last_completed_time)
-                current_start_msk = DataManager.to_msk_time(self.current_45m_start)
-
-                self.logger.info(f"Дополнительные 5м свечи: {len(klines_to_use)} шт (только завершённые)")
-                self.logger.info(
-                    f"Период завершённых данных: {current_start_msk.strftime('%H:%M')} - {last_completed_msk.strftime('%H:%M')} МСК")
+                self.logger.info(f"Текущий 45м интервал дострое из {len(klines_to_use)} завершенных 5м свечей")
             else:
-                self.logger.info(f"Дополнительные 5м свечи: 0 (не найдены)")
-                self.current_45m_candle = {'close': 0.0, 'high': 0.0, 'low': 999999.0, 'open': 0.0, 'volume': 0.0}
+                self.current_45m_candle = {'open': 0.0, 'high': 0.0, 'low': 999999.0, 'close': 0.0, 'volume': 0.0}
                 self.klines_45m.append(0.0)
 
         except Exception as e:
-            self.logger.error(f"Ошибка доформирования интервала: {e}")
+            self.logger.error(f"Ошибка достройки 45м интервала: {e}")
 
-    def update_current_45m_candle(self, price, high, low, volume):
-        """Обновление текущей 45м свечи ТОЧНО как в тестовом модуле"""
+    def update_45m_candle(self, price, high, low, volume):
+        """Обновление текущей 45м свечи"""
         if self.current_45m_candle is None:
             self.current_45m_candle = {
-                'open': price,
-                'high': price,
-                'low': price,
-                'close': price,
-                'volume': volume
+                'open': price, 'high': price, 'low': price,
+                'close': price, 'volume': volume
             }
         else:
             if self.current_45m_candle['open'] == 0.0:
@@ -301,60 +216,146 @@ class DataManager:
             self.current_45m_candle['close'] = price
             self.current_45m_candle['volume'] += volume
 
-    def check_45m_interval_change(self, timestamp):
-        """Проверка смены 45м интервала"""
-        current_interval = DataManager.get_45m_interval_start(timestamp)
+    def handle_5m_websocket(self, message):
+        """WebSocket обработка для 5м таймфрейма"""
+        try:
+            data = json.loads(message)
+            if 'k' not in data:
+                return
 
-        if current_interval != self.last_45m_start:
-            # Новый 45м интервал начался!
-            last_msk = DataManager.to_msk_time(self.last_45m_start)
-            current_msk = DataManager.to_msk_time(current_interval)
+            kline = data['k']
+            close_price = float(kline['c'])
+            kline_start_time = pd.to_datetime(int(kline['t']), unit='ms', utc=True)
+            is_kline_closed = kline['x']
 
-            self.logger.info(
-                f"ЗАКРЫЛСЯ интервал: {last_msk.strftime('%H:%M')}-{(last_msk + timedelta(minutes=45)).strftime('%H:%M')} МСК")
-            self.logger.info(
-                f"НАЧАЛСЯ интервал: {current_msk.strftime('%H:%M')}-{(current_msk + timedelta(minutes=45)).strftime('%H:%M')} МСК")
+            self.last_websocket_price = close_price
 
-            # Фиксируем предыдущую 45м свечу
-            if self.current_45m_candle and self.current_45m_candle['close'] != 0.0:
-                self.logger.info(f"ФИКСАЦИЯ 45М свечи: Close: {self.current_45m_candle['close']}")
+            # Проверяем смену интервала
+            new_interval = DataManager.get_5m_interval_start(kline_start_time)
+            interval_changed = (new_interval != self.current_interval_start)
 
-            # Начинаем новую 45м свечу
-            self.last_45m_start = current_interval
-            self.current_45m_start = current_interval
-            self.current_45m_candle = None
+            if is_kline_closed:
+                if interval_changed:
+                    # Новый интервал начался
+                    old_msk = DataManager.to_msk_time(self.current_interval_start)
+                    new_msk = DataManager.to_msk_time(new_interval)
 
-            # Добавляем новую пустую свечу для нового интервала
-            self.klines_45m.append(0.0)
+                    self.logger.info(
+                        f"5М ИНТЕРВАЛ ЗАКРЫТ: {old_msk.strftime('%H:%M')}-{(old_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК | Close: {close_price}")
+                    self.logger.info(
+                        f"5М ИНТЕРВАЛ ОТКРЫТ: {new_msk.strftime('%H:%M')}-{(new_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК")
 
-            # Ограничиваем размер массива
-            if len(self.klines_45m) > 250:
-                self.klines_45m = self.klines_45m[-200:]
-                self.logger.info(f"Массив обрезан до {len(self.klines_45m)} свечей")
+                    self.current_interval_start = new_interval
 
-            return True
-        return False
+                # Добавляем новую свечу
+                self.klines_data.append(close_price)
 
-    def check_5m_interval_change(self, timestamp):
-        """Проверка смены 5м интервала"""
-        current_interval = DataManager.get_5m_interval_start(timestamp)
+                # Ограничиваем размер
+                if len(self.klines_data) > 250:
+                    self.klines_data = self.klines_data[-200:]
+            else:
+                # Обновляем текущую свечу
+                if len(self.klines_data) > 0:
+                    self.klines_data[-1] = close_price
+                else:
+                    self.klines_data.append(close_price)
 
-        if current_interval != self.current_interval_start:
-            # Новый 5м интервал начался!
-            if self.current_interval_start is not None:
-                current_msk = DataManager.to_msk_time(current_interval)
+            self.calculate_macd()
 
-                # Логируем только начало нового интервала, закрытие уже залогировано в handle_kline_message_5m
+        except Exception as e:
+            self.logger.error(f"Ошибка 5м WebSocket: {e}")
+
+    def handle_45m_websocket(self, message):
+        """WebSocket обработка для 45м таймфрейма"""
+        try:
+            data = json.loads(message)
+            if 'k' not in data:
+                return
+
+            kline = data['k']
+            close_price = float(kline['c'])
+            high_price = float(kline['h'])
+            low_price = float(kline['l'])
+            volume = float(kline['v'])
+            kline_start_time = pd.to_datetime(int(kline['t']), unit='ms', utc=True)
+
+            self.last_websocket_price = close_price
+
+            # Проверяем смену 45м интервала
+            new_45m_interval = DataManager.get_45m_interval_start(kline_start_time)
+            interval_changed = (new_45m_interval != self.current_45m_start)
+
+            if interval_changed:
+                # 45м интервал закрылся!
+                old_msk = DataManager.to_msk_time(self.current_45m_start)
+                new_msk = DataManager.to_msk_time(new_45m_interval)
+
                 self.logger.info(
-                    f"НАЧАЛСЯ интервал: {current_msk.strftime('%H:%M')}-{(current_msk + timedelta(minutes=5)).strftime('%H:%M')} МСК")
+                    f"45М ИНТЕРВАЛ ЗАКРЫТ: {old_msk.strftime('%H:%M')}-{(old_msk + timedelta(minutes=45)).strftime('%H:%M')} МСК")
+                self.logger.info(
+                    f"45М ИНТЕРВАЛ ОТКРЫТ: {new_msk.strftime('%H:%M')}-{(new_msk + timedelta(minutes=45)).strftime('%H:%M')} МСК")
 
-            self.current_interval_start = current_interval
-            return True
-        return False
+                # Фиксируем предыдущую свечу
+                if self.current_45m_candle and self.current_45m_candle['close'] != 0.0:
+                    self.logger.info(f"45М свеча зафиксирована: {self.current_45m_candle['close']}")
+
+                # Начинаем новую 45м свечу
+                self.current_45m_start = new_45m_interval
+                self.current_45m_candle = None
+                self.klines_45m.append(0.0)
+
+                # Ограничиваем размер
+                if len(self.klines_45m) > 250:
+                    self.klines_45m = self.klines_45m[-200:]
+
+            # Обновляем текущую 45м свечу
+            self.update_45m_candle(close_price, high_price, low_price, volume)
+
+            # Обновляем цену в массиве
+            if len(self.klines_45m) > 0:
+                self.klines_45m[-1] = close_price
+
+            self.calculate_macd()
+
+        except Exception as e:
+            self.logger.error(f"Ошибка 45м WebSocket: {e}")
+
+    def start_websocket(self):
+        def on_message(_, message):
+            if self.timeframe == "5m":
+                self.handle_5m_websocket(message)
+            else:
+                self.handle_45m_websocket(message)
+
+        def on_error(_, error):
+            self.logger.error(f"WebSocket ошибка: {error}")
+
+        def on_close(_, __, ___):
+            self.logger.info("WebSocket закрыт")
+            if self.running:
+                time.sleep(5)
+                self.start_websocket()
+
+        def on_open(_):
+            self.logger.info("WebSocket подключен")
+
+        socket_url = f"wss://fstream.binance.com/ws/{self.ws_stream}"
+
+        self.ws = websocket.WebSocketApp(
+            socket_url,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+            on_open=on_open
+        )
+
+        self.logger.info(f"Подключение к: {socket_url}")
+        self.running = True
+        self.ws.run_forever()
 
     @staticmethod
     def calculate_ema(prices, period):
-        """Расчет EMA"""
+        """Расчет EMA с высокой точностью"""
         prices = np.array(prices, dtype=np.float64)
 
         if len(prices) < period:
@@ -363,48 +364,48 @@ class DataManager:
         ema = np.full_like(prices, np.nan, dtype=np.float64)
         alpha = np.float64(2.0) / np.float64(period + 1.0)
 
-        # Находим первый не-NaN элемент для инициализации
+        # Находим первый валидный индекс
         first_valid = period - 1
         for i in range(len(prices)):
             if not np.isnan(prices[i]):
-                if period == 7:  # Для signal EMA
+                if period == 7:  # Signal EMA
                     if prices[i] != 0:
                         first_valid = max(i, period - 1)
                         break
-                else:  # Для обычных EMA
+                else:
                     first_valid = max(i, period - 1)
                     break
 
         if first_valid >= len(prices):
             return ema
 
-        # Первое значение EMA = SMA первых period значений
+        # Первое значение = SMA
         if first_valid + period <= len(prices):
             valid_window = prices[first_valid - period + 1:first_valid + 1]
-            if period == 7:  # Для signal EMA
+            if period == 7:
                 if not np.any(np.isnan(valid_window)) and not np.any(valid_window == 0):
                     ema[first_valid] = np.mean(valid_window, dtype=np.float64)
                 elif first_valid < len(prices):
                     ema[first_valid] = prices[first_valid]
-            else:  # Для обычных EMA
+            else:
                 if not np.any(np.isnan(valid_window)):
                     ema[first_valid] = np.mean(valid_window, dtype=np.float64)
                 elif first_valid < len(prices):
                     ema[first_valid] = prices[first_valid]
 
-        # Остальные значения по формуле EMA с повышенной точностью
+        # Остальные значения по формуле EMA
         for i in range(first_valid + 1, len(prices)):
-            if period == 7:  # Для signal EMA
+            if period == 7:
                 if not np.isnan(prices[i]) and prices[i] != 0 and not np.isnan(ema[i - 1]):
                     ema[i] = alpha * prices[i] + (np.float64(1.0) - alpha) * ema[i - 1]
-            else:  # Для обычных EMA
+            else:
                 if not np.isnan(prices[i]) and not np.isnan(ema[i - 1]):
                     ema[i] = alpha * prices[i] + (np.float64(1.0) - alpha) * ema[i - 1]
 
         return ema
 
     def calculate_macd(self):
-        """Расчет MACD с параметрами из конфигурации"""
+        """Расчет MACD индикатора"""
         fast_period = self.config['MACD_FAST']
         slow_period = self.config['MACD_SLOW']
         signal_period = self.config['MACD_SIGNAL']
@@ -415,7 +416,7 @@ class DataManager:
             if len(self.klines_data) < min_required:
                 return
             prices = np.array(self.klines_data, dtype=np.float64)
-        else:  # 45m
+        else:
             if len(self.klines_45m) < min_required:
                 return
             prices = np.array(self.klines_45m, dtype=np.float64)
@@ -424,16 +425,13 @@ class DataManager:
         ema_fast = DataManager.calculate_ema(prices, fast_period)
         ema_slow = DataManager.calculate_ema(prices, slow_period)
 
-        # MACD Line = EMA_fast - EMA_slow
+        # MACD Line
         macd_line = np.full_like(prices, np.nan, dtype=np.float64)
-
-        # MACD считается только там, где есть оба EMA
         for i in range(len(prices)):
             if not np.isnan(ema_fast[i]) and not np.isnan(ema_slow[i]):
                 macd_line[i] = ema_fast[i] - ema_slow[i]
 
-        # Signal Line = EMA от MACD (только от валидных значений MACD)
-        # Находим первый валидный MACD
+        # Signal Line
         first_macd_idx = None
         for i in range(len(macd_line)):
             if not np.isnan(macd_line[i]):
@@ -443,204 +441,47 @@ class DataManager:
         if first_macd_idx is None or len(macd_line) - first_macd_idx < signal_period:
             return
 
-        # Берем только валидную часть MACD для расчета Signal
         valid_macd = macd_line[first_macd_idx:]
         signal_ema = DataManager.calculate_ema(valid_macd, signal_period)
 
-        # Восстанавливаем Signal в полный массив
         signal_line = np.full_like(prices, np.nan, dtype=np.float64)
         signal_line[first_macd_idx:] = signal_ema
 
-        # Получаем последние значения БЕЗ округления
+        # Получаем последние значения
         current_macd = float(macd_line[-1]) if not np.isnan(macd_line[-1]) else 0.0
         current_signal = float(signal_line[-1]) if not np.isnan(signal_line[-1]) else 0.0
         current_histogram = current_macd - current_signal
 
-        # Проверяем что значения валидны
         if np.isnan(current_macd) or np.isnan(current_signal):
             return
 
-        # Сохраняем значения
         self.macd_data = {
             'macd': current_macd,
             'signal': current_signal,
             'histogram': current_histogram
         }
 
-    def handle_kline_message_5m(self, _, message):
-        """Обработка WebSocket сообщений для 5m"""
-        try:
-            data = json.loads(message)
-
-            if 'k' in data:
-                kline = data['k']
-                close_price = float(kline['c'])
-                kline_start_time = pd.to_datetime(int(kline['t']), unit='ms', utc=True)
-                is_kline_closed = kline['x']
-
-                # Сохраняем последнюю цену из WebSocket
-                self.last_websocket_price = close_price
-
-                # Проверяем смену интервала
-                interval_changed = self.check_5m_interval_change(kline_start_time)
-
-                if is_kline_closed:
-                    # Свеча закрылась - добавляем новую свечу
-                    self.klines_data.append(close_price)
-
-                    # Логируем закрытие только если интервал НЕ изменился
-                    # (если изменился, то уже залогировано в check_5m_interval_change)
-                    if not interval_changed:
-                        kline_msk = DataManager.to_msk_time(kline_start_time)
-                        kline_end_msk = kline_msk + timedelta(minutes=5)
-                        self.logger.info(
-                            f"ЗАКРЫЛСЯ интервал: {kline_msk.strftime('%H:%M')}-{kline_end_msk.strftime('%H:%M')} МСК | Закрытие: {close_price}")
-
-                    # Ограничиваем размер массива
-                    if len(self.klines_data) > 250:
-                        self.klines_data = self.klines_data[-200:]
-                        self.logger.info(f"Массив обрезан до {len(self.klines_data)} свечей")
-                else:
-                    # Свеча ещё идёт - обновляем последнюю цену
-                    if len(self.klines_data) > 0:
-                        self.klines_data[-1] = close_price
-                    else:
-                        # Первая свеча после запуска
-                        self.klines_data.append(close_price)
-
-                # Пересчитываем MACD
-                self.calculate_macd()
-
-        except Exception as ws_error:
-            self.logger.error(f"Ошибка обработки WebSocket сообщения: {ws_error}")
-
-    def handle_kline_message_45m(self, _, message):
-        """Обработка WebSocket сообщений для 45m"""
-        try:
-            data = json.loads(message)
-
-            if 'k' in data:
-                kline = data['k']
-                close_price = float(kline['c'])
-                high_price = float(kline['h'])
-                low_price = float(kline['l'])
-                volume = float(kline['v'])
-                kline_start_time = pd.to_datetime(int(kline['t']), unit='ms', utc=True)
-                is_kline_closed = kline['x']
-
-                # Сохраняем последнюю цену из WebSocket
-                self.last_websocket_price = close_price
-
-                # Проверяем смену 45м интервала
-                self.check_45m_interval_change(kline_start_time)
-
-                # Обновляем текущую 45м свечу
-                self.update_current_45m_candle(close_price, high_price, low_price, volume)
-
-                # Обновляем последнюю цену в массиве
-                if len(self.klines_45m) > 0:
-                    self.klines_45m[-1] = close_price
-
-                if is_kline_closed:
-                    kline_msk = DataManager.to_msk_time(kline_start_time)
-                    self.logger.info(f"5М СВЕЧА ЗАКРЫТА: {kline_msk.strftime('%H:%M')} МСК | Цена: {close_price}")
-
-                # Пересчитываем MACD
-                self.calculate_macd()
-
-        except Exception as e:
-            self.logger.error(f"Ошибка WebSocket: {e}")
-
-    def start_websocket(self):
-        def on_message(_, message):
-            if self.timeframe == "5m":
-                self.handle_kline_message_5m(_, message)
-            else:
-                self.handle_kline_message_45m(_, message)
-
-        def on_error(_, error):
-            self.logger.error(f"Ошибка WebSocket: {error}")
-
-        def on_close(_, __, ___):
-            self.logger.info("WebSocket соединение закрыто")
-            if self.running:
-                time.sleep(5)
-                self.start_websocket()
-
-        def on_open(_):
-            self.logger.info("FUTURES WebSocket соединение открыто")
-
-        stream = self.ws_stream
-        # Используем ФЬЮЧЕРСНЫЙ WebSocket для получения фьючерсных цен
-        socket_url = f"wss://fstream.binance.com/ws/{stream}"
-
-        self.ws = websocket.WebSocketApp(
-            socket_url,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_open=on_open
-        )
-
-        self.logger.info(f"Подключение к FUTURES WebSocket: {socket_url}")
-        self.running = True
-        self.ws.run_forever()
-
-    def get_current_timeframe_status(self):
-        with self.lock:
-            if self.timeframe == "5m":
-                if not self.current_data:
-                    return None, False
-
-                last_candle = self.current_data[-1]
-
-                from datetime import timedelta
-                current_time = datetime.now(timezone.utc)
-                candle_start = last_candle['timestamp']
-
-                if candle_start.tzinfo is None:
-                    candle_start = candle_start.replace(tzinfo=timezone.utc)
-
-                expected_end = candle_start + timedelta(minutes=5)
-                is_complete = current_time >= expected_end
-
-                return last_candle, is_complete
-            else:
-                if not self.current_45m_candle:
-                    return None, False
-
-                current_time = datetime.now(timezone.utc)
-                candle_start = self.current_45m_start
-                from datetime import timedelta
-                expected_end = candle_start + timedelta(minutes=45)
-
-                is_complete = current_time >= expected_end
-                return self.current_45m_candle, is_complete
-
     def get_current_interval_info(self):
-        """Получить информацию о текущем интервале для отображения в статусе"""
+        """Информация о текущем интервале для статуса"""
         with self.lock:
             if self.timeframe == "5m":
                 if self.current_interval_start:
                     start_msk = DataManager.to_msk_time(self.current_interval_start)
                     end_msk = start_msk + timedelta(minutes=5)
                     return f"{start_msk.strftime('%H:%M')}-{end_msk.strftime('%H:%M')} МСК (5m)"
-                else:
-                    return "N/A (5m)"
-            else:  # 45m
+                return "N/A (5m)"
+            else:
                 if self.current_45m_start:
                     start_msk = DataManager.to_msk_time(self.current_45m_start)
                     end_msk = start_msk + timedelta(minutes=45)
                     return f"{start_msk.strftime('%H:%M')}-{end_msk.strftime('%H:%M')} МСК (45m)"
-                else:
-                    return "N/A (45m)"
+                return "N/A (45m)"
 
     def get_macd_data(self):
         with self.lock:
             return self.macd_data.copy()
 
     def get_last_websocket_price(self):
-        """Получить последнюю цену из WebSocket данных"""
         with self.lock:
             return self.last_websocket_price
 
