@@ -21,18 +21,16 @@ class TradingEngine:
 
         self.current_position = None
 
-        # Instrument info for proper quantity formatting
         self.qty_step = None
         self.min_order_qty = None
         self.max_order_qty = None
         self.tick_size = None
 
-        # Get instrument info and setup leverage
         self.get_instrument_info()
         self.setup_leverage()
 
     def get_instrument_info(self):
-        """Get instrument specifications for proper order formatting"""
+        """Получение информации об активе для правильного округления размера позиции"""
         try:
             response = self.session.get_instruments_info(
                 category="linear",
@@ -42,13 +40,11 @@ class TradingEngine:
             if response['retCode'] == 0 and response['result']['list']:
                 instrument = response['result']['list'][0]
 
-                # Extract lot size filter info
                 lot_size_filter = instrument['lotSizeFilter']
                 self.qty_step = float(lot_size_filter['qtyStep'])
                 self.min_order_qty = float(lot_size_filter['minOrderQty'])
                 self.max_order_qty = float(lot_size_filter['maxOrderQty'])
 
-                # Extract price filter info
                 price_filter = instrument['priceFilter']
                 self.tick_size = float(price_filter['tickSize'])
 
@@ -58,7 +54,6 @@ class TradingEngine:
             else:
                 self.logger.error(
                     f"Не удалось получить информацию об инструменте: {response.get('retMsg', 'Unknown error')}")
-                # Fallback values for ETHUSDT
                 self.qty_step = 0.001
                 self.min_order_qty = 0.001
                 self.max_order_qty = 1000000
@@ -67,7 +62,6 @@ class TradingEngine:
 
         except Exception as e:
             self.logger.api_error("Bybit", f"Ошибка получения информации об инструменте: {e}")
-            # Fallback values
             self.qty_step = 0.001
             self.min_order_qty = 0.001
             self.max_order_qty = 1000000
@@ -75,16 +69,14 @@ class TradingEngine:
             self.logger.warning(f"Используются стандартные параметры для {self.symbol}")
 
     def round_quantity(self, quantity):
-        """Round quantity according to instrument specifications"""
+        """Количесвто quantity в соответствии с биржей"""
         if self.qty_step is None:
-            return round(quantity, 3)  # Fallback
+            return round(quantity, 3)
 
-        # Round to nearest qty_step
         precision = len(str(self.qty_step).split('.')[-1]) if '.' in str(self.qty_step) else 0
         rounded_qty = round(quantity / self.qty_step) * self.qty_step
         rounded_qty = round(rounded_qty, precision)
 
-        # Ensure it's within min/max limits
         if rounded_qty < self.min_order_qty:
             rounded_qty = self.min_order_qty
         elif rounded_qty > self.max_order_qty:
@@ -93,9 +85,9 @@ class TradingEngine:
         return rounded_qty
 
     def round_price(self, price):
-        """Round price according to instrument specifications"""
+        """Округление цены в соответствии с API"""
         if self.tick_size is None:
-            return round(price, 2)  # Fallback
+            return round(price, 2)
 
         precision = len(str(self.tick_size).split('.')[-1]) if '.' in str(self.tick_size) else 0
         rounded_price = round(price / self.tick_size) * self.tick_size
@@ -113,14 +105,12 @@ class TradingEngine:
             if response['retCode'] == 0:
                 self.logger.info(f"Плечо установлено {self.leverage}x для {self.symbol}")
             else:
-                # Error code 110043 means leverage is already set - this is OK
                 if response.get('retCode') == 110043:
                     self.logger.info(f"Плечо уже установлено {self.leverage}x для {self.symbol}")
                 else:
                     self.logger.error(f"Не удалось установить плечо: {response['retMsg']}")
 
         except Exception as e:
-            # Check if it's the leverage already set error
             if "110043" in str(e):
                 self.logger.info(f"Плечо уже установлено {self.leverage}x для {self.symbol}")
             else:
@@ -183,11 +173,10 @@ class TradingEngine:
             return 0
 
     def calculate_quantity(self, price):
-        """Calculate and properly round order quantity"""
+        """Расчёт и правильное округление количества позиции"""
         total_value = self.position_size * self.leverage
         raw_quantity = total_value / price
 
-        # Round according to instrument specifications
         rounded_quantity = self.round_quantity(raw_quantity)
 
         self.logger.info(f"Расчет количества: {total_value} USDT / {price} = {raw_quantity:.6f} -> {rounded_quantity}")
@@ -200,10 +189,8 @@ class TradingEngine:
             return True
 
         try:
-            # Close position by placing opposite order
             opposite_side = "Sell" if position['side'] == "Buy" else "Buy"
 
-            # Round the position size properly
             rounded_size = self.round_quantity(position['size'])
 
             response = self.session.place_order(
@@ -232,11 +219,10 @@ class TradingEngine:
             return False
 
     def open_position(self, side):
-        # Close existing position first
         if not self.close_position():
             return False
 
-        time.sleep(1)  # Wait for position to close
+        time.sleep(1)
 
         current_price = self.get_current_price()
         if current_price == 0:
@@ -250,7 +236,6 @@ class TradingEngine:
             self.logger.insufficient_funds(self.position_size, balance)
             return False
 
-        # Validate quantity is within limits
         if quantity < self.min_order_qty:
             self.logger.error(f"Количество {quantity} меньше минимального {self.min_order_qty}")
             return False
